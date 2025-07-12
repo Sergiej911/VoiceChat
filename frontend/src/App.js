@@ -1,11 +1,11 @@
 import React from 'react';
 import './App.css';
-import { Free4Talk } from './components';
+import { AppWithAuth } from './components';
 
 function App() {
   return (
     <div className="App">
-      <Free4Talk />
+      <AppWithAuth />
     </div>
   );
 }

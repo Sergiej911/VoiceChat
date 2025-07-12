@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useContext, createContext } from 'react';
 import { 
   UserIcon, 
   MicrophoneIcon, 
@@ -8,121 +8,287 @@ import {
   SunIcon,
   MoonIcon,
   Cog6ToothIcon,
-  HeartIcon
+  HeartIcon,
+  PhoneIcon,
+  SpeakerWaveIcon,
+  SpeakerXMarkIcon
 } from '@heroicons/react/24/outline';
 import { MicrophoneIcon as MicrophoneSolid } from '@heroicons/react/24/solid';
+import axios from 'axios';
+import Peer from 'simple-peer';
 
-// Mock data for chat rooms
-const mockRooms = [
-  {
-    id: 1,
-    language: 'Arabic',
-    level: 'Advanced',
-    users: [
-      { id: 1, initials: 'MU', name: 'Muhammad', status: 'speaking', color: '#10B981' }
-    ],
-    participantCount: 1,
-    maxUsers: 8,
-    isFull: false
-  },
-  {
-    id: 2,
-    language: 'English',
-    level: 'Any Level',
-    users: [
-      { id: 2, initials: 'HA', name: 'Hassan', status: 'listening', color: '#3B82F6' },
-      { id: 3, initials: 'KK', name: 'Karen', status: 'listening', color: '#6B7280' }
-    ],
-    participantCount: 2,
-    maxUsers: 8,
-    isFull: false
-  },
-  {
-    id: 3,
-    language: 'English',
-    level: 'Upper Intermediate',
-    users: [],
-    participantCount: 0,
-    maxUsers: 8,
-    isFull: false
-  },
-  {
-    id: 4,
-    language: 'English',
-    level: 'Any Level',
-    users: [
-      { id: 4, initials: 'NN', name: 'Nina', status: 'speaking', color: '#F59E0B' }
-    ],
-    participantCount: 1,
-    maxUsers: 8,
-    isFull: true
-  },
-  {
-    id: 5,
-    language: 'Hindi + English',
-    level: 'Any Level',
-    users: [
-      { id: 5, initials: 'NN', name: 'Neha', status: 'speaking', color: '#8B5CF6' }
-    ],
-    participantCount: 1,
-    maxUsers: 8,
-    isFull: false
-  },
-  {
-    id: 6,
-    language: 'English',
-    level: 'Intermediate',
-    users: [
-      { id: 6, initials: 'SM', name: 'Sarah', status: 'speaking', color: '#DC2626', avatar: 'https://images.unsplash.com/photo-1494790108755-2616b612e0a8?w=150&h=150&fit=crop&crop=face' },
-      { id: 7, initials: 'EM', name: 'Emma', status: 'listening', color: '#059669' }
-    ],
-    participantCount: 2,
-    maxUsers: 8,
-    isFull: false
-  },
-  {
-    id: 7,
-    language: 'Indonesian',
-    level: 'Any Level',
-    users: [
-      { id: 8, initials: 'SG', name: 'Sari', status: 'speaking', color: '#7C3AED' }
-    ],
-    participantCount: 1,
-    maxUsers: 8,
-    isFull: true
-  },
-  {
-    id: 8,
-    language: 'English',
-    level: 'Any Level',
-    users: [
-      { id: 9, initials: 'AA', name: 'Ahmed', status: 'speaking', color: '#EC4899' }
-    ],
-    participantCount: 1,
-    maxUsers: 8,
-    isFull: false
+const API_BASE = process.env.REACT_APP_BACKEND_URL + '/api';
+
+// Auth Context
+const AuthContext = createContext();
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
   }
-];
+  return context;
+};
+
+const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [token, setToken] = useState(localStorage.getItem('token'));
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const initAuth = async () => {
+      if (token) {
+        try {
+          const response = await axios.get(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          setUser(response.data);
+        } catch (error) {
+          localStorage.removeItem('token');
+          setToken(null);
+        }
+      }
+      setLoading(false);
+    };
+
+    initAuth();
+  }, [token]);
+
+  const login = async (email, password) => {
+    try {
+      const response = await axios.post(`${API_BASE}/auth/login`, { email, password });
+      const { access_token, user: userData } = response.data;
+      localStorage.setItem('token', access_token);
+      setToken(access_token);
+      setUser(userData);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.response?.data?.detail || 'Login failed' };
+    }
+  };
+
+  const register = async (email, username, password) => {
+    try {
+      const response = await axios.post(`${API_BASE}/auth/register`, { email, username, password });
+      const { access_token, user: userData } = response.data;
+      localStorage.setItem('token', access_token);
+      setToken(access_token);
+      setUser(userData);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.response?.data?.detail || 'Registration failed' };
+    }
+  };
+
+  const logout = async () => {
+    if (token) {
+      try {
+        await axios.post(`${API_BASE}/auth/logout`, {}, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      } catch (error) {
+        console.error('Logout error:', error);
+      }
+    }
+    localStorage.removeItem('token');
+    setToken(null);
+    setUser(null);
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, token, login, register, logout, loading }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+// WebRTC Hook
+const useWebRTC = (roomId, userId) => {
+  const [peers, setPeers] = useState({});
+  const [localStream, setLocalStream] = useState(null);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const wsRef = useRef(null);
+  const peersRef = useRef({});
+
+  useEffect(() => {
+    if (!roomId || !userId) return;
+
+    const initWebRTC = async () => {
+      try {
+        // Get user media
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: true, 
+          video: false 
+        });
+        setLocalStream(stream);
+
+        // Connect to WebSocket
+        const ws = new WebSocket(`${process.env.REACT_APP_BACKEND_URL.replace('https:', 'wss:').replace('http:', 'ws:')}/ws/${roomId}/${userId}`);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          setIsConnected(true);
+          console.log('WebSocket connected');
+        };
+
+        ws.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          handleWebSocketMessage(message, stream);
+        };
+
+        ws.onclose = () => {
+          setIsConnected(false);
+          console.log('WebSocket disconnected');
+        };
+
+        ws.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          setIsConnected(false);
+        };
+
+      } catch (error) {
+        console.error('Error initializing WebRTC:', error);
+      }
+    };
+
+    initWebRTC();
+
+    return () => {
+      // Cleanup
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+      }
+      Object.values(peersRef.current).forEach(peer => {
+        peer.destroy();
+      });
+    };
+  }, [roomId, userId]);
+
+  const handleWebSocketMessage = (message, stream) => {
+    switch (message.type) {
+      case 'user_joined':
+        createPeerConnection(message.user.id, true, stream);
+        break;
+      case 'user_left':
+        if (peersRef.current[message.user_id]) {
+          peersRef.current[message.user_id].destroy();
+          delete peersRef.current[message.user_id];
+          setPeers(prev => {
+            const newPeers = { ...prev };
+            delete newPeers[message.user_id];
+            return newPeers;
+          });
+        }
+        break;
+      case 'webrtc_offer':
+        handleOffer(message.from_user, message.offer, stream);
+        break;
+      case 'webrtc_answer':
+        handleAnswer(message.from_user, message.answer);
+        break;
+      case 'ice_candidate':
+        handleICECandidate(message.from_user, message.candidate);
+        break;
+      default:
+        break;
+    }
+  };
+
+  const createPeerConnection = (targetUserId, initiator, stream) => {
+    const peer = new Peer({
+      initiator,
+      trickle: false,
+      stream: stream
+    });
+
+    peer.on('signal', (signal) => {
+      if (wsRef.current) {
+        wsRef.current.send(JSON.stringify({
+          type: initiator ? 'webrtc_offer' : 'webrtc_answer',
+          to_user: targetUserId,
+          [initiator ? 'offer' : 'answer']: signal
+        }));
+      }
+    });
+
+    peer.on('stream', (remoteStream) => {
+      setPeers(prev => ({
+        ...prev,
+        [targetUserId]: { peer, stream: remoteStream }
+      }));
+    });
+
+    peer.on('close', () => {
+      setPeers(prev => {
+        const newPeers = { ...prev };
+        delete newPeers[targetUserId];
+        return newPeers;
+      });
+    });
+
+    peersRef.current[targetUserId] = peer;
+  };
+
+  const handleOffer = (fromUserId, offer, stream) => {
+    createPeerConnection(fromUserId, false, stream);
+    peersRef.current[fromUserId].signal(offer);
+  };
+
+  const handleAnswer = (fromUserId, answer) => {
+    if (peersRef.current[fromUserId]) {
+      peersRef.current[fromUserId].signal(answer);
+    }
+  };
+
+  const handleICECandidate = (fromUserId, candidate) => {
+    if (peersRef.current[fromUserId]) {
+      peersRef.current[fromUserId].signal(candidate);
+    }
+  };
+
+  const toggleMute = () => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = isMuted;
+      });
+      setIsMuted(!isMuted);
+    }
+  };
+
+  return {
+    peers,
+    localStream,
+    isMuted,
+    isConnected,
+    toggleMute
+  };
+};
 
 // Language filter options
 const languageFilters = [
-  { name: 'All', count: 306, active: true },
-  { name: 'English', count: 200 },
-  { name: 'Hindi', count: 54 },
-  { name: 'Indonesian', count: 35 },
-  { name: 'Vietnamese', count: 28 },
-  { name: 'Urdu', count: 22 },
-  { name: 'Bengali', count: 21 },
-  { name: 'Arabic', count: 17 },
-  { name: 'Telugu', count: 10 },
-  { name: 'Spanish', count: 7 },
-  { name: 'Chinese', count: 6 },
-  { name: 'Japanese', count: 4 },
-  { name: 'Tamil', count: 3 }
+  { name: 'All', count: 0, active: true },
+  { name: 'English', count: 0 },
+  { name: 'Hindi', count: 0 },
+  { name: 'Indonesian', count: 0 },
+  { name: 'Vietnamese', count: 0 },
+  { name: 'Urdu', count: 0 },
+  { name: 'Bengali', count: 0 },
+  { name: 'Arabic', count: 0 },
+  { name: 'Telugu', count: 0 },
+  { name: 'Spanish', count: 0 },
+  { name: 'Chinese', count: 0 },
+  { name: 'Japanese', count: 0 },
+  { name: 'Tamil', count: 0 }
 ];
 
 // Header Component
 export const Header = ({ darkMode, toggleDarkMode, onSignIn, onCreateRoom }) => {
+  const { user, logout } = useAuth();
+
   return (
     <div className={`${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'} border-b transition-colors duration-200`}>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -139,7 +305,7 @@ export const Header = ({ darkMode, toggleDarkMode, onSignIn, onCreateRoom }) => 
             </h1>
           </div>
 
-          {/* Right side buttons */}
+          {/* Right side */}
           <div className="flex items-center space-x-4">
             <button
               onClick={toggleDarkMode}
@@ -156,12 +322,26 @@ export const Header = ({ darkMode, toggleDarkMode, onSignIn, onCreateRoom }) => 
               ☕ Buy me a coffee
             </button>
             
-            <button
-              onClick={onSignIn}
-              className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-medium transition-colors"
-            >
-              Sign In
-            </button>
+            {user ? (
+              <div className="flex items-center space-x-2">
+                <span className={`text-sm ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                  Hi, {user.username}
+                </span>
+                <button
+                  onClick={logout}
+                  className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                >
+                  Logout
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={onSignIn}
+                className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+              >
+                Sign In
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -170,8 +350,18 @@ export const Header = ({ darkMode, toggleDarkMode, onSignIn, onCreateRoom }) => 
 };
 
 // Search and Controls Component
-export const SearchControls = ({ darkMode, searchTerm, onSearchChange, onCreateRoom }) => {
+export const SearchControls = ({ darkMode, searchTerm, onSearchChange, onCreateRoom, rooms }) => {
   const [selectedFilters, setSelectedFilters] = useState(['All']);
+  const { user } = useAuth();
+
+  // Update language filter counts
+  const updatedFilters = languageFilters.map(filter => {
+    if (filter.name === 'All') {
+      return { ...filter, count: rooms.length };
+    }
+    const count = rooms.filter(room => room.language.toLowerCase().includes(filter.name.toLowerCase())).length;
+    return { ...filter, count };
+  });
 
   const toggleFilter = (filterName) => {
     if (filterName === 'All') {
@@ -190,13 +380,15 @@ export const SearchControls = ({ darkMode, searchTerm, onSearchChange, onCreateR
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
         {/* Action buttons */}
         <div className="flex items-center justify-center space-x-4 mb-4">
-          <button
-            onClick={onCreateRoom}
-            className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg font-medium transition-colors flex items-center space-x-2"
-          >
-            <PlusIcon className="h-5 w-5" />
-            <span>Create a new group</span>
-          </button>
+          {user && (
+            <button
+              onClick={onCreateRoom}
+              className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg font-medium transition-colors flex items-center space-x-2"
+            >
+              <PlusIcon className="h-5 w-5" />
+              <span>Create a new group</span>
+            </button>
+          )}
           
           <div className="flex items-center space-x-2">
             <span className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Privacy Policy</span>
@@ -225,7 +417,7 @@ export const SearchControls = ({ darkMode, searchTerm, onSearchChange, onCreateR
 
         {/* Language filters */}
         <div className="flex flex-wrap gap-2">
-          {languageFilters.map((filter) => (
+          {updatedFilters.map((filter) => (
             <button
               key={filter.name}
               onClick={() => toggleFilter(filter.name)}
@@ -248,30 +440,32 @@ export const SearchControls = ({ darkMode, searchTerm, onSearchChange, onCreateR
 
 // Chat Room Card Component
 export const ChatRoomCard = ({ room, darkMode, onJoinRoom }) => {
+  const { user } = useAuth();
+
   const renderUsers = () => {
     const maxDisplay = 4;
-    const displayUsers = room.users.slice(0, maxDisplay);
-    const remainingCount = room.users.length - maxDisplay;
+    const displayUsers = room.participants.slice(0, maxDisplay);
+    const remainingCount = room.participants.length - maxDisplay;
 
     return (
       <div className="flex items-center justify-center space-x-2 mb-4 min-h-[80px]">
-        {displayUsers.map((user, index) => (
-          <div key={user.id} className="relative">
+        {displayUsers.map((participant, index) => (
+          <div key={participant.id} className="relative">
             <div 
               className="w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-sm"
-              style={{ backgroundColor: user.color }}
+              style={{ backgroundColor: getAvatarColor(participant.username) }}
             >
-              {user.avatar ? (
+              {participant.avatar_url ? (
                 <img 
-                  src={user.avatar} 
-                  alt={user.name}
+                  src={participant.avatar_url} 
+                  alt={participant.username}
                   className="w-full h-full rounded-full object-cover"
                 />
               ) : (
-                user.initials
+                participant.username.substring(0, 2).toUpperCase()
               )}
             </div>
-            {user.status === 'speaking' && (
+            {room.active_speakers.includes(participant.id) && (
               <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-1">
                 <MicrophoneSolid className="h-3 w-3 text-white" />
               </div>
@@ -286,6 +480,12 @@ export const ChatRoomCard = ({ room, darkMode, onJoinRoom }) => {
         )}
       </div>
     );
+  };
+
+  const getAvatarColor = (username) => {
+    const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'];
+    const hash = username.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+    return colors[hash % colors.length];
   };
 
   return (
@@ -305,17 +505,24 @@ export const ChatRoomCard = ({ room, darkMode, onJoinRoom }) => {
         </span>
       </div>
 
+      {/* Room name if exists */}
+      {room.name && (
+        <div className={`text-sm font-medium mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+          {room.name}
+        </div>
+      )}
+
       {/* Users */}
       {renderUsers()}
 
       {/* Action button */}
       <div className="text-center">
-        {room.isFull ? (
+        {room.is_full ? (
           <div className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'} flex items-center justify-center space-x-1`}>
             <span>🔒</span>
             <span>This group is full</span>
           </div>
-        ) : (
+        ) : user ? (
           <button
             onClick={() => onJoinRoom(room)}
             className="text-blue-500 hover:text-blue-600 text-sm font-medium flex items-center justify-center space-x-1 transition-colors"
@@ -323,6 +530,10 @@ export const ChatRoomCard = ({ room, darkMode, onJoinRoom }) => {
             <MicrophoneIcon className="h-4 w-4" />
             <span>Join and talk now!</span>
           </button>
+        ) : (
+          <div className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+            Sign in to join
+          </div>
         )}
       </div>
     </div>
@@ -334,22 +545,31 @@ export const CreateRoomModal = ({ isOpen, onClose, darkMode, onCreateRoom }) => 
   const [formData, setFormData] = useState({
     language: 'English',
     level: 'Any Level',
-    roomName: '',
-    maxUsers: 8,
-    isPrivate: false
+    name: '',
+    max_users: 8,
+    is_private: false
   });
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    onCreateRoom(formData);
-    onClose();
-    setFormData({
-      language: 'English',
-      level: 'Any Level',
-      roomName: '',
-      maxUsers: 8,
-      isPrivate: false
-    });
+    setLoading(true);
+    
+    try {
+      await onCreateRoom(formData);
+      onClose();
+      setFormData({
+        language: 'English',
+        level: 'Any Level',
+        name: '',
+        max_users: 8,
+        is_private: false
+      });
+    } catch (error) {
+      console.error('Error creating room:', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -391,6 +611,7 @@ export const CreateRoomModal = ({ isOpen, onClose, darkMode, onCreateRoom }) => 
               <option>Japanese</option>
               <option>Arabic</option>
               <option>Hindi</option>
+              <option>Indonesian</option>
             </select>
           </div>
 
@@ -421,8 +642,8 @@ export const CreateRoomModal = ({ isOpen, onClose, darkMode, onCreateRoom }) => 
             </label>
             <input
               type="text"
-              value={formData.roomName}
-              onChange={(e) => setFormData({...formData, roomName: e.target.value})}
+              value={formData.name}
+              onChange={(e) => setFormData({...formData, name: e.target.value})}
               placeholder="Enter room name"
               className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors ${
                 darkMode 
@@ -437,8 +658,8 @@ export const CreateRoomModal = ({ isOpen, onClose, darkMode, onCreateRoom }) => 
               Maximum Users
             </label>
             <select
-              value={formData.maxUsers}
-              onChange={(e) => setFormData({...formData, maxUsers: parseInt(e.target.value)})}
+              value={formData.max_users}
+              onChange={(e) => setFormData({...formData, max_users: parseInt(e.target.value)})}
               className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors ${
                 darkMode 
                   ? 'bg-slate-700 border-slate-600 text-white' 
@@ -457,8 +678,8 @@ export const CreateRoomModal = ({ isOpen, onClose, darkMode, onCreateRoom }) => 
             <input
               type="checkbox"
               id="private"
-              checked={formData.isPrivate}
-              onChange={(e) => setFormData({...formData, isPrivate: e.target.checked})}
+              checked={formData.is_private}
+              onChange={(e) => setFormData({...formData, is_private: e.target.checked})}
               className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
             />
             <label htmlFor="private" className={`ml-2 text-sm ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>
@@ -470,6 +691,7 @@ export const CreateRoomModal = ({ isOpen, onClose, darkMode, onCreateRoom }) => 
             <button
               type="button"
               onClick={onClose}
+              disabled={loading}
               className={`flex-1 py-3 px-4 border rounded-lg font-medium transition-colors ${
                 darkMode 
                   ? 'border-slate-600 text-gray-300 hover:bg-slate-700' 
@@ -480,9 +702,10 @@ export const CreateRoomModal = ({ isOpen, onClose, darkMode, onCreateRoom }) => 
             </button>
             <button
               type="submit"
-              className="flex-1 py-3 px-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+              disabled={loading}
+              className="flex-1 py-3 px-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
             >
-              Create Room
+              {loading ? 'Creating...' : 'Create Room'}
             </button>
           </div>
         </form>
@@ -500,12 +723,41 @@ export const SignInModal = ({ isOpen, onClose, darkMode }) => {
     password: '',
     confirmPassword: ''
   });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const { login, register } = useAuth();
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    // Mock authentication
-    console.log(isSignUp ? 'Sign up' : 'Sign in', formData);
-    onClose();
+    setLoading(true);
+    setError('');
+
+    try {
+      if (isSignUp) {
+        if (formData.password !== formData.confirmPassword) {
+          setError('Passwords do not match');
+          setLoading(false);
+          return;
+        }
+        const result = await register(formData.email, formData.username, formData.password);
+        if (result.success) {
+          onClose();
+        } else {
+          setError(result.error);
+        }
+      } else {
+        const result = await login(formData.email, formData.password);
+        if (result.success) {
+          onClose();
+        } else {
+          setError(result.error);
+        }
+      }
+    } catch (error) {
+      setError('An unexpected error occurred');
+    } finally {
+      setLoading(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -524,6 +776,12 @@ export const SignInModal = ({ isOpen, onClose, darkMode }) => {
             <XMarkIcon className={`h-5 w-5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} />
           </button>
         </div>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+            {error}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {isSignUp && (
@@ -604,9 +862,10 @@ export const SignInModal = ({ isOpen, onClose, darkMode }) => {
 
           <button
             type="submit"
-            className="w-full py-3 px-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+            disabled={loading}
+            className="w-full py-3 px-4 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
           >
-            {isSignUp ? 'Create Account' : 'Sign In'}
+            {loading ? (isSignUp ? 'Creating Account...' : 'Signing In...') : (isSignUp ? 'Create Account' : 'Sign In')}
           </button>
         </form>
 
@@ -625,8 +884,38 @@ export const SignInModal = ({ isOpen, onClose, darkMode }) => {
 
 // Room View Component (for when user joins a room)
 export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
-  const [isMuted, setIsMuted] = useState(false);
-  const [isConnected, setIsConnected] = useState(true);
+  const { user, token } = useAuth();
+  const [roomData, setRoomData] = useState(room);
+  const { peers, localStream, isMuted, isConnected, toggleMute } = useWebRTC(room.id, user?.id);
+
+  useEffect(() => {
+    // Join the room via API
+    const joinRoom = async () => {
+      try {
+        await axios.post(`${API_BASE}/rooms/${room.id}/join`, {}, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      } catch (error) {
+        console.error('Error joining room:', error);
+      }
+    };
+
+    if (user && token) {
+      joinRoom();
+    }
+  }, [room.id, user, token]);
+
+  const handleLeaveRoom = async () => {
+    try {
+      await axios.post(`${API_BASE}/rooms/${room.id}/leave`, {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      onLeaveRoom();
+    } catch (error) {
+      console.error('Error leaving room:', error);
+      onLeaveRoom();
+    }
+  };
 
   return (
     <div className={`min-h-screen ${darkMode ? 'bg-slate-900' : 'bg-gray-50'} transition-colors duration-200`}>
@@ -636,17 +925,18 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center space-x-4">
               <button
-                onClick={onLeaveRoom}
+                onClick={handleLeaveRoom}
                 className={`text-sm ${darkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'} transition-colors`}
               >
                 ← Back to Rooms
               </button>
               <div>
                 <h1 className={`text-lg font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-                  {room.language} - {room.level}
+                  {roomData.language} - {roomData.level}
+                  {roomData.name && <span className="text-sm ml-2">({roomData.name})</span>}
                 </h1>
                 <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                  {room.participantCount} participants
+                  {roomData.participant_count} participants
                 </p>
               </div>
             </div>
@@ -668,46 +958,70 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Participants Grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 mb-8">
-          {room.users.map((user) => (
+          {roomData.participants.map((participant) => (
             <div
-              key={user.id}
+              key={participant.id}
               className={`${darkMode ? 'bg-slate-800' : 'bg-white'} rounded-lg p-6 text-center transition-colors duration-200 border ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}
             >
               <div className="relative inline-block mb-3">
                 <div 
                   className="w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-lg"
-                  style={{ backgroundColor: user.color }}
+                  style={{ backgroundColor: getAvatarColor(participant.username) }}
                 >
-                  {user.avatar ? (
+                  {participant.avatar_url ? (
                     <img 
-                      src={user.avatar} 
-                      alt={user.name}
+                      src={participant.avatar_url} 
+                      alt={participant.username}
                       className="w-full h-full rounded-full object-cover"
                     />
                   ) : (
-                    user.initials
+                    participant.username.substring(0, 2).toUpperCase()
                   )}
                 </div>
-                {user.status === 'speaking' && (
+                {roomData.active_speakers.includes(participant.id) && (
                   <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-2">
                     <MicrophoneSolid className="h-4 w-4 text-white" />
                   </div>
                 )}
               </div>
               <p className={`font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-                {user.name}
+                {participant.username}
               </p>
               <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                {user.status === 'speaking' ? 'Speaking' : 'Listening'}
+                {roomData.active_speakers.includes(participant.id) ? 'Speaking' : 'Listening'}
               </p>
+              
+              {/* Audio element for peer streams */}
+              {peers[participant.id] && (
+                <audio
+                  ref={(audio) => {
+                    if (audio && peers[participant.id].stream) {
+                      audio.srcObject = peers[participant.id].stream;
+                      audio.play().catch(console.error);
+                    }
+                  }}
+                  autoPlay
+                />
+              )}
             </div>
           ))}
 
           {/* Current user */}
           <div className={`${darkMode ? 'bg-slate-800 border-blue-500' : 'bg-white border-blue-500'} border-2 rounded-lg p-6 text-center transition-colors duration-200`}>
             <div className="relative inline-block mb-3">
-              <div className="w-16 h-16 rounded-full bg-blue-500 flex items-center justify-center text-white font-bold text-lg">
-                ME
+              <div 
+                className="w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-lg"
+                style={{ backgroundColor: getAvatarColor(user?.username || 'You') }}
+              >
+                {user?.avatar_url ? (
+                  <img 
+                    src={user.avatar_url} 
+                    alt={user.username}
+                    className="w-full h-full rounded-full object-cover"
+                  />
+                ) : (
+                  (user?.username?.substring(0, 2) || 'ME').toUpperCase()
+                )}
               </div>
               {!isMuted && (
                 <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-2">
@@ -716,7 +1030,7 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
               )}
             </div>
             <p className={`font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-              You
+              You ({user?.username})
             </p>
             <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
               {isMuted ? 'Muted' : 'Speaking'}
@@ -727,7 +1041,7 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
         {/* Controls */}
         <div className="flex items-center justify-center space-x-4">
           <button
-            onClick={() => setIsMuted(!isMuted)}
+            onClick={toggleMute}
             className={`p-4 rounded-full transition-colors ${
               isMuted 
                 ? 'bg-red-500 hover:bg-red-600 text-white' 
@@ -738,7 +1052,7 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
           </button>
           
           <button
-            onClick={onLeaveRoom}
+            onClick={handleLeaveRoom}
             className="px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors"
           >
             Leave Room
@@ -749,6 +1063,13 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
   );
 };
 
+// Utility function for avatar colors
+const getAvatarColor = (username) => {
+  const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'];
+  const hash = username.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+  return colors[hash % colors.length];
+};
+
 // Main Free4Talk Component
 export const Free4Talk = () => {
   const [darkMode, setDarkMode] = useState(true);
@@ -756,34 +1077,68 @@ export const Free4Talk = () => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showSignInModal, setShowSignInModal] = useState(false);
   const [currentRoom, setCurrentRoom] = useState(null);
-  const [rooms, setRooms] = useState(mockRooms);
+  const [rooms, setRooms] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const { user, token } = useAuth();
+
+  useEffect(() => {
+    fetchRooms();
+  }, []);
+
+  const fetchRooms = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/rooms`);
+      setRooms(response.data);
+    } catch (error) {
+      console.error('Error fetching rooms:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const filteredRooms = rooms.filter(room =>
     room.language.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    room.level.toLowerCase().includes(searchTerm.toLowerCase())
+    room.level.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (room.name && room.name.toLowerCase().includes(searchTerm.toLowerCase()))
   );
 
-  const handleCreateRoom = (roomData) => {
-    const newRoom = {
-      id: rooms.length + 1,
-      language: roomData.language,
-      level: roomData.level,
-      users: [],
-      participantCount: 0,
-      maxUsers: roomData.maxUsers,
-      isFull: false,
-      name: roomData.roomName
-    };
-    setRooms([...rooms, newRoom]);
+  const handleCreateRoom = async (roomData) => {
+    try {
+      const response = await axios.post(`${API_BASE}/rooms`, roomData, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setRooms([response.data, ...rooms]);
+      setShowCreateModal(false);
+    } catch (error) {
+      console.error('Error creating room:', error);
+      throw error;
+    }
   };
 
-  const handleJoinRoom = (room) => {
+  const handleJoinRoom = async (room) => {
+    if (!user) {
+      setShowSignInModal(true);
+      return;
+    }
+
     setCurrentRoom(room);
   };
 
   const handleLeaveRoom = () => {
     setCurrentRoom(null);
+    fetchRooms(); // Refresh rooms list
   };
+
+  if (loading) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center ${darkMode ? 'bg-slate-900' : 'bg-gray-50'}`}>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-500 mx-auto"></div>
+          <p className={`mt-4 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>Loading rooms...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (currentRoom) {
     return (
@@ -811,29 +1166,40 @@ export const Free4Talk = () => {
         searchTerm={searchTerm}
         onSearchChange={setSearchTerm}
         onCreateRoom={() => setShowCreateModal(true)}
+        rooms={rooms}
       />
 
       {/* Main content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredRooms.map((room) => (
-            <ChatRoomCard
-              key={room.id}
-              room={room}
-              darkMode={darkMode}
-              onJoinRoom={handleJoinRoom}
-            />
-          ))}
-        </div>
+        {filteredRooms.length === 0 ? (
+          <div className="text-center py-12">
+            <p className={`text-lg ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+              No rooms found. {user ? 'Create the first one!' : 'Sign in to create a room!'}
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {filteredRooms.map((room) => (
+              <ChatRoomCard
+                key={room.id}
+                room={room}
+                darkMode={darkMode}
+                onJoinRoom={handleJoinRoom}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Modals */}
-      <CreateRoomModal
-        isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        darkMode={darkMode}
-        onCreateRoom={handleCreateRoom}
-      />
+      {user && (
+        <CreateRoomModal
+          isOpen={showCreateModal}
+          onClose={() => setShowCreateModal(false)}
+          darkMode={darkMode}
+          onCreateRoom={handleCreateRoom}
+        />
+      )}
 
       <SignInModal
         isOpen={showSignInModal}
@@ -843,3 +1209,10 @@ export const Free4Talk = () => {
     </div>
   );
 };
+
+// Wrap the main component with AuthProvider
+export const AppWithAuth = () => (
+  <AuthProvider>
+    <Free4Talk />
+  </AuthProvider>
+);
