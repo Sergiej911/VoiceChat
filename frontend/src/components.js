@@ -102,38 +102,65 @@ const AuthProvider = ({ children }) => {
   );
 };
 
-// WebRTC Hook
-const useWebRTC = (roomId, userId) => {
+// WebRTC Hook with improved voice functionality
+const useWebRTC = (roomId, userId, token, onRoomUpdate) => {
   const [peers, setPeers] = useState({});
   const [localStream, setLocalStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [audioPermissionGranted, setAudioPermissionGranted] = useState(false);
   const wsRef = useRef(null);
   const peersRef = useRef({});
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const speakingTimeoutRef = useRef(null);
 
   useEffect(() => {
-    if (!roomId || !userId) return;
+    if (!roomId || !userId || !token) return;
 
     const initWebRTC = async () => {
       try {
-        // Get user media
+        console.log('Requesting audio permissions...');
+        // Get user media with specific constraints
         const stream = await navigator.mediaDevices.getUserMedia({ 
-          audio: true, 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 44100
+          }, 
           video: false 
         });
+        
         setLocalStream(stream);
+        setAudioPermissionGranted(true);
+        console.log('Audio stream obtained successfully');
+
+        // Set up voice activity detection
+        setupVoiceActivityDetection(stream);
 
         // Connect to WebSocket
-        const ws = new WebSocket(`${process.env.REACT_APP_BACKEND_URL.replace('https:', 'wss:').replace('http:', 'ws:')}/ws/${roomId}/${userId}`);
+        const wsUrl = `${process.env.REACT_APP_BACKEND_URL.replace('https:', 'wss:').replace('http:', 'ws:')}/ws/${roomId}/${userId}`;
+        console.log('Connecting to WebSocket:', wsUrl);
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
           setIsConnected(true);
-          console.log('WebSocket connected');
+          console.log('WebSocket connected successfully');
+          
+          // Send initial join message
+          ws.send(JSON.stringify({
+            type: 'user_joined',
+            user_id: userId,
+            room_id: roomId
+          }));
         };
 
         ws.onmessage = (event) => {
           const message = JSON.parse(event.data);
+          console.log('WebSocket message received:', message);
           handleWebSocketMessage(message, stream);
         };
 
@@ -149,12 +176,15 @@ const useWebRTC = (roomId, userId) => {
 
       } catch (error) {
         console.error('Error initializing WebRTC:', error);
+        setAudioPermissionGranted(false);
+        alert('Microphone access is required for voice chat. Please enable it and refresh the page.');
       }
     };
 
     initWebRTC();
 
     return () => {
+      console.log('Cleaning up WebRTC...');
       // Cleanup
       if (wsRef.current) {
         wsRef.current.close();
@@ -163,17 +193,99 @@ const useWebRTC = (roomId, userId) => {
         localStream.getTracks().forEach(track => track.stop());
       }
       Object.values(peersRef.current).forEach(peer => {
-        peer.destroy();
+        if (peer && peer.destroy) {
+          peer.destroy();
+        }
       });
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
+      if (speakingTimeoutRef.current) {
+        clearTimeout(speakingTimeoutRef.current);
+      }
     };
-  }, [roomId, userId]);
+  }, [roomId, userId, token]);
+
+  const setupVoiceActivityDetection = (stream) => {
+    try {
+      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContextRef.current.createMediaStreamSource(stream);
+      analyserRef.current = audioContextRef.current.createAnalyser();
+      analyserRef.current.fftSize = 256;
+      source.connect(analyserRef.current);
+
+      const detectVoiceActivity = () => {
+        if (!analyserRef.current) return;
+        
+        const bufferLength = analyserRef.current.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+        analyserRef.current.getByteFrequencyData(dataArray);
+        
+        // Calculate volume level
+        const sum = dataArray.reduce((a, b) => a + b, 0);
+        const average = sum / bufferLength;
+        const volumeLevel = average / 255;
+        
+        // Voice activity threshold
+        const threshold = 0.01;
+        const isSpeakingNow = volumeLevel > threshold && !isMuted;
+        
+        if (isSpeakingNow !== isSpeaking) {
+          setIsSpeaking(isSpeakingNow);
+          updateVoiceStatus(isSpeakingNow);
+        }
+        
+        // Clear speaking timeout if still speaking
+        if (isSpeakingNow) {
+          if (speakingTimeoutRef.current) {
+            clearTimeout(speakingTimeoutRef.current);
+          }
+          speakingTimeoutRef.current = setTimeout(() => {
+            setIsSpeaking(false);
+            updateVoiceStatus(false);
+          }, 1000); // Stop speaking after 1 second of silence
+        }
+        
+        requestAnimationFrame(detectVoiceActivity);
+      };
+      
+      detectVoiceActivity();
+    } catch (error) {
+      console.error('Error setting up voice activity detection:', error);
+    }
+  };
+
+  const updateVoiceStatus = async (speaking) => {
+    if (!token || !roomId || !userId) return;
+    
+    try {
+      await axios.post(`${API_BASE}/voice/status`, {
+        room_id: roomId,
+        user_id: userId,
+        is_speaking: speaking,
+        is_muted: isMuted
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+    } catch (error) {
+      console.error('Error updating voice status:', error);
+    }
+  };
 
   const handleWebSocketMessage = (message, stream) => {
+    console.log('Handling WebSocket message:', message.type);
+    
     switch (message.type) {
       case 'user_joined':
-        createPeerConnection(message.user.id, true, stream);
+        if (message.user && message.user.id !== userId) {
+          console.log('User joined, creating peer connection:', message.user.id);
+          createPeerConnection(message.user.id, true, stream);
+        }
+        if (onRoomUpdate) onRoomUpdate();
         break;
+        
       case 'user_left':
+        console.log('User left:', message.user_id);
         if (peersRef.current[message.user_id]) {
           peersRef.current[message.user_id].destroy();
           delete peersRef.current[message.user_id];
@@ -183,79 +295,158 @@ const useWebRTC = (roomId, userId) => {
             return newPeers;
           });
         }
+        if (onRoomUpdate) onRoomUpdate();
         break;
+        
+      case 'user_disconnected':
+        console.log('User disconnected:', message.user_id);
+        if (peersRef.current[message.user_id]) {
+          peersRef.current[message.user_id].destroy();
+          delete peersRef.current[message.user_id];
+          setPeers(prev => {
+            const newPeers = { ...prev };
+            delete newPeers[message.user_id];
+            return newPeers;
+          });
+        }
+        if (onRoomUpdate) onRoomUpdate();
+        break;
+        
       case 'webrtc_offer':
+        console.log('Received WebRTC offer from:', message.from_user);
         handleOffer(message.from_user, message.offer, stream);
         break;
+        
       case 'webrtc_answer':
+        console.log('Received WebRTC answer from:', message.from_user);
         handleAnswer(message.from_user, message.answer);
         break;
+        
       case 'ice_candidate':
+        console.log('Received ICE candidate from:', message.from_user);
         handleICECandidate(message.from_user, message.candidate);
         break;
+        
+      case 'voice_status_update':
+        console.log('Voice status update:', message);
+        if (onRoomUpdate) onRoomUpdate();
+        break;
+        
       default:
+        console.log('Unknown message type:', message.type);
         break;
     }
   };
 
   const createPeerConnection = (targetUserId, initiator, stream) => {
+    console.log(`Creating peer connection with ${targetUserId}, initiator: ${initiator}`);
+    
+    // Don't create duplicate connections
+    if (peersRef.current[targetUserId]) {
+      console.log('Peer connection already exists for:', targetUserId);
+      return;
+    }
+
     const peer = new Peer({
       initiator,
       trickle: false,
-      stream: stream
+      stream: stream,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      }
     });
 
     peer.on('signal', (signal) => {
-      if (wsRef.current) {
+      console.log(`Sending ${initiator ? 'offer' : 'answer'} to:`, targetUserId);
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: initiator ? 'webrtc_offer' : 'webrtc_answer',
           to_user: targetUserId,
+          from_user: userId,
           [initiator ? 'offer' : 'answer']: signal
         }));
       }
     });
 
     peer.on('stream', (remoteStream) => {
+      console.log('Received remote stream from:', targetUserId);
       setPeers(prev => ({
         ...prev,
-        [targetUserId]: { peer, stream: remoteStream }
+        [targetUserId]: { peer, stream: remoteStream, userId: targetUserId }
       }));
     });
 
+    peer.on('connect', () => {
+      console.log('Peer connected:', targetUserId);
+    });
+
     peer.on('close', () => {
+      console.log('Peer connection closed:', targetUserId);
       setPeers(prev => {
         const newPeers = { ...prev };
         delete newPeers[targetUserId];
         return newPeers;
       });
+      delete peersRef.current[targetUserId];
+    });
+
+    peer.on('error', (error) => {
+      console.error('Peer error:', error);
     });
 
     peersRef.current[targetUserId] = peer;
   };
 
   const handleOffer = (fromUserId, offer, stream) => {
-    createPeerConnection(fromUserId, false, stream);
-    peersRef.current[fromUserId].signal(offer);
+    console.log('Handling offer from:', fromUserId);
+    if (!peersRef.current[fromUserId]) {
+      createPeerConnection(fromUserId, false, stream);
+      setTimeout(() => {
+        if (peersRef.current[fromUserId]) {
+          peersRef.current[fromUserId].signal(offer);
+        }
+      }, 100);
+    }
   };
 
   const handleAnswer = (fromUserId, answer) => {
+    console.log('Handling answer from:', fromUserId);
     if (peersRef.current[fromUserId]) {
       peersRef.current[fromUserId].signal(answer);
     }
   };
 
   const handleICECandidate = (fromUserId, candidate) => {
+    console.log('Handling ICE candidate from:', fromUserId);
     if (peersRef.current[fromUserId]) {
       peersRef.current[fromUserId].signal(candidate);
     }
   };
 
-  const toggleMute = () => {
+  const toggleMute = async () => {
     if (localStream) {
+      const newMutedState = !isMuted;
       localStream.getAudioTracks().forEach(track => {
-        track.enabled = isMuted;
+        track.enabled = !newMutedState;
       });
-      setIsMuted(!isMuted);
+      setIsMuted(newMutedState);
+      
+      // Update voice status when muting/unmuting
+      try {
+        await axios.post(`${API_BASE}/voice/status`, {
+          room_id: roomId,
+          user_id: userId,
+          is_speaking: !newMutedState && isSpeaking,
+          is_muted: newMutedState
+        }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      } catch (error) {
+        console.error('Error updating mute status:', error);
+      }
     }
   };
 
@@ -264,6 +455,8 @@ const useWebRTC = (roomId, userId) => {
     localStream,
     isMuted,
     isConnected,
+    isSpeaking,
+    audioPermissionGranted,
     toggleMute
   };
 };
