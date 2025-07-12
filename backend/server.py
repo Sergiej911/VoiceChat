@@ -325,8 +325,10 @@ async def create_room(room_data: ChatRoomCreate, current_user: User = Depends(ge
     await db.rooms.insert_one(room.dict())
     
     user_response = UserResponse(**current_user.dict())
+    room_dict = room.dict()
+    room_dict.pop('participants', None)  # Remove participants from room dict to avoid conflict
     return ChatRoomResponse(
-        **room.dict(),
+        **room_dict,
         participants=[user_response],
         participant_count=1,
         is_full=False
