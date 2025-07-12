@@ -1079,26 +1079,59 @@ export const SignInModal = ({ isOpen, onClose, darkMode }) => {
 export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
   const { user, token } = useAuth();
   const [roomData, setRoomData] = useState(room);
-  const { peers, localStream, isMuted, isConnected, toggleMute } = useWebRTC(room.id, user?.id);
+  const [isLoading, setIsLoading] = useState(false);
+  
+  // Callback to refresh room data
+  const refreshRoomData = async () => {
+    if (!room.id || !token) return;
+    
+    try {
+      const response = await axios.get(`${API_BASE}/rooms/${room.id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setRoomData(response.data);
+    } catch (error) {
+      console.error('Error refreshing room data:', error);
+    }
+  };
+
+  const { peers, localStream, isMuted, isConnected, isSpeaking, audioPermissionGranted, toggleMute } = useWebRTC(
+    room.id, 
+    user?.id, 
+    token, 
+    refreshRoomData
+  );
 
   useEffect(() => {
     // Join the room via API
     const joinRoom = async () => {
+      if (!user || !token) return;
+      
+      setIsLoading(true);
       try {
         await axios.post(`${API_BASE}/rooms/${room.id}/join`, {}, {
           headers: { Authorization: `Bearer ${token}` }
         });
+        // Refresh room data after joining
+        await refreshRoomData();
       } catch (error) {
         console.error('Error joining room:', error);
+      } finally {
+        setIsLoading(false);
       }
     };
 
-    if (user && token) {
-      joinRoom();
-    }
+    joinRoom();
   }, [room.id, user, token]);
 
+  // Refresh room data periodically
+  useEffect(() => {
+    const interval = setInterval(refreshRoomData, 5000); // Refresh every 5 seconds
+    return () => clearInterval(interval);
+  }, [room.id, token]);
+
   const handleLeaveRoom = async () => {
+    setIsLoading(true);
     try {
       await axios.post(`${API_BASE}/rooms/${room.id}/leave`, {}, {
         headers: { Authorization: `Bearer ${token}` }
@@ -1110,6 +1143,36 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
     }
   };
 
+  const getAvatarColor = (username) => {
+    const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'];
+    const hash = username.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+    return colors[hash % colors.length];
+  };
+
+  const isUserSpeaking = (participantId) => {
+    return roomData.active_speakers && roomData.active_speakers.includes(participantId);
+  };
+
+  if (!audioPermissionGranted) {
+    return (
+      <div className={`min-h-screen ${darkMode ? 'bg-slate-900' : 'bg-gray-50'} transition-colors duration-200`}>
+        <div className="flex items-center justify-center min-h-screen">
+          <div className={`text-center p-8 rounded-lg ${darkMode ? 'bg-slate-800 text-white' : 'bg-white text-gray-900'}`}>
+            <MicrophoneIcon className="h-16 w-16 mx-auto mb-4 text-red-500" />
+            <h2 className="text-xl font-bold mb-2">Microphone Access Required</h2>
+            <p className="mb-4">Please allow microphone access to join the voice chat.</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg font-medium transition-colors"
+            >
+              Refresh Page
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`min-h-screen ${darkMode ? 'bg-slate-900' : 'bg-gray-50'} transition-colors duration-200`}>
       {/* Header */}
@@ -1119,7 +1182,8 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
             <div className="flex items-center space-x-4">
               <button
                 onClick={handleLeaveRoom}
-                className={`text-sm ${darkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'} transition-colors`}
+                disabled={isLoading}
+                className={`text-sm ${darkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'} transition-colors disabled:opacity-50`}
               >
                 ← Back to Rooms
               </button>
@@ -1129,7 +1193,8 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
                   {roomData.name && <span className="text-sm ml-2">({roomData.name})</span>}
                 </h1>
                 <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                  {roomData.participant_count} participants
+                  {roomData.participant_count} participant{roomData.participant_count !== 1 ? 's' : ''}
+                  {roomData.max_users && ` • Max: ${roomData.max_users}`}
                 </p>
               </div>
             </div>
@@ -1140,8 +1205,14 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
                   ? 'bg-green-100 text-green-800' 
                   : 'bg-red-100 text-red-800'
               }`}>
-                {isConnected ? 'Connected' : 'Disconnected'}
+                {isConnected ? 'Connected' : 'Connecting...'}
               </div>
+              
+              {isSpeaking && (
+                <div className="px-3 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                  Speaking
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1149,16 +1220,33 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
 
       {/* Room Content */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Audio Permission Status */}
+        {!isConnected && (
+          <div className={`mb-6 p-4 rounded-lg ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'} border`}>
+            <div className="flex items-center space-x-3">
+              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
+              <span className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
+                Connecting to voice chat...
+              </span>
+            </div>
+          </div>
+        )}
+
         {/* Participants Grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 mb-8">
-          {roomData.participants.map((participant) => (
+          {/* Other participants */}
+          {roomData.participants && roomData.participants
+            .filter(participant => participant.id !== user?.id)
+            .map((participant) => (
             <div
               key={participant.id}
               className={`${darkMode ? 'bg-slate-800' : 'bg-white'} rounded-lg p-6 text-center transition-colors duration-200 border ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}
             >
               <div className="relative inline-block mb-3">
                 <div 
-                  className="w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-lg"
+                  className={`w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-lg ${
+                    isUserSpeaking(participant.id) ? 'ring-4 ring-green-400 ring-opacity-75' : ''
+                  }`}
                   style={{ backgroundColor: getAvatarColor(participant.username) }}
                 >
                   {participant.avatar_url ? (
@@ -1171,29 +1259,35 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
                     participant.username.substring(0, 2).toUpperCase()
                   )}
                 </div>
-                {roomData.active_speakers.includes(participant.id) && (
-                  <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-2">
+                {isUserSpeaking(participant.id) && (
+                  <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-2 animate-pulse">
                     <MicrophoneSolid className="h-4 w-4 text-white" />
                   </div>
+                )}
+                {participant.is_online && (
+                  <div className="absolute -top-1 -right-1 w-5 h-5 bg-green-500 rounded-full border-2 border-white"></div>
                 )}
               </div>
               <p className={`font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>
                 {participant.username}
               </p>
               <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                {roomData.active_speakers.includes(participant.id) ? 'Speaking' : 'Listening'}
+                {isUserSpeaking(participant.id) ? 'Speaking' : 'Listening'}
               </p>
               
               {/* Audio element for peer streams */}
               {peers[participant.id] && (
                 <audio
+                  key={`audio-${participant.id}`}
                   ref={(audio) => {
-                    if (audio && peers[participant.id].stream) {
+                    if (audio && peers[participant.id] && peers[participant.id].stream) {
                       audio.srcObject = peers[participant.id].stream;
-                      audio.play().catch(console.error);
+                      audio.volume = 1.0;
+                      audio.play().catch(e => console.log('Audio play failed:', e));
                     }
                   }}
                   autoPlay
+                  playsInline
                 />
               )}
             </div>
@@ -1203,7 +1297,9 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
           <div className={`${darkMode ? 'bg-slate-800 border-blue-500' : 'bg-white border-blue-500'} border-2 rounded-lg p-6 text-center transition-colors duration-200`}>
             <div className="relative inline-block mb-3">
               <div 
-                className="w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-lg"
+                className={`w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-lg ${
+                  isSpeaking && !isMuted ? 'ring-4 ring-green-400 ring-opacity-75' : ''
+                }`}
                 style={{ backgroundColor: getAvatarColor(user?.username || 'You') }}
               >
                 {user?.avatar_url ? (
@@ -1216,9 +1312,14 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
                   (user?.username?.substring(0, 2) || 'ME').toUpperCase()
                 )}
               </div>
-              {!isMuted && (
-                <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-2">
+              {isSpeaking && !isMuted && (
+                <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-2 animate-pulse">
                   <MicrophoneSolid className="h-4 w-4 text-white" />
+                </div>
+              )}
+              {isMuted && (
+                <div className="absolute -bottom-1 -right-1 bg-red-500 rounded-full p-2">
+                  <SpeakerXMarkIcon className="h-4 w-4 text-white" />
                 </div>
               )}
             </div>
@@ -1226,31 +1327,76 @@ export const RoomView = ({ room, onLeaveRoom, darkMode }) => {
               You ({user?.username})
             </p>
             <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-              {isMuted ? 'Muted' : 'Speaking'}
+              {isMuted ? 'Muted' : (isSpeaking ? 'Speaking' : 'Listening')}
             </p>
           </div>
         </div>
+
+        {/* Voice Activity Visualization */}
+        {localStream && (
+          <div className={`mb-6 p-4 rounded-lg ${darkMode ? 'bg-slate-800' : 'bg-white'} border ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}>
+            <div className="flex items-center justify-between">
+              <span className={`text-sm font-medium ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                Voice Activity
+              </span>
+              <div className={`flex items-center space-x-2 ${isSpeaking ? 'text-green-500' : 'text-gray-400'}`}>
+                <div className={`w-2 h-2 rounded-full ${isSpeaking ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
+                <span className="text-sm">
+                  {isSpeaking ? 'Speaking' : 'Silent'}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Controls */}
         <div className="flex items-center justify-center space-x-4">
           <button
             onClick={toggleMute}
-            className={`p-4 rounded-full transition-colors ${
+            disabled={!localStream}
+            className={`p-4 rounded-full transition-colors disabled:opacity-50 ${
               isMuted 
                 ? 'bg-red-500 hover:bg-red-600 text-white' 
                 : 'bg-green-500 hover:bg-green-600 text-white'
             }`}
+            title={isMuted ? 'Unmute' : 'Mute'}
           >
-            <MicrophoneIcon className="h-6 w-6" />
+            {isMuted ? (
+              <SpeakerXMarkIcon className="h-6 w-6" />
+            ) : (
+              <MicrophoneIcon className="h-6 w-6" />
+            )}
           </button>
           
-          <button
-            onClick={handleLeaveRoom}
-            className="px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors"
-          >
-            Leave Room
-          </button>
+          <div className="flex flex-col items-center space-y-2">
+            <button
+              onClick={handleLeaveRoom}
+              disabled={isLoading}
+              className="px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+            >
+              {isLoading ? 'Leaving...' : 'Leave Room'}
+            </button>
+            <span className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+              Press and hold to speak clearly
+            </span>
+          </div>
         </div>
+
+        {/* Debug Info (only in development) */}
+        {process.env.NODE_ENV === 'development' && (
+          <div className="mt-8 p-4 bg-gray-100 dark:bg-gray-800 rounded-lg">
+            <h3 className="font-bold mb-2">Debug Info:</h3>
+            <div className="text-xs space-y-1">
+              <div>Connected Peers: {Object.keys(peers).length}</div>
+              <div>Local Stream: {localStream ? 'Active' : 'None'}</div>
+              <div>WebSocket: {isConnected ? 'Connected' : 'Disconnected'}</div>
+              <div>Speaking: {isSpeaking ? 'Yes' : 'No'}</div>
+              <div>Muted: {isMuted ? 'Yes' : 'No'}</div>
+              <div>Room Participants: {roomData.participant_count}</div>
+              <div>Active Speakers: {roomData.active_speakers?.length || 0}</div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
