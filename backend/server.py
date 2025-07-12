@@ -352,10 +352,15 @@ async def join_room(room_id: str, current_user: User = Depends(get_current_user)
         )
     
     # Notify other participants
+    user_response = UserResponse(**current_user.dict())
+    user_dict = user_response.dict()
+    # Convert datetime objects to ISO format strings for JSON serialization
+    user_dict["created_at"] = user_dict["created_at"].isoformat()
+    
     await manager.broadcast_to_room(
         json.dumps({
             "type": "user_joined",
-            "user": UserResponse(**current_user.dict()).dict(),
+            "user": user_dict,
             "room_id": room_id
         }),
         room_id,
