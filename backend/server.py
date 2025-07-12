@@ -408,8 +408,10 @@ async def get_room(room_id: str):
         participant_users = await db.users.find({"id": {"$in": room["participants"]}}).to_list(1000)
         participants = [UserResponse(**user) for user in participant_users]
     
+    room_dict = room.copy()
+    room_dict.pop('participants', None)  # Remove participants to avoid conflict
     return ChatRoomResponse(
-        **room,
+        **room_dict,
         participants=participants,
         participant_count=len(room["participants"]),
         is_full=len(room["participants"]) >= room["max_users"]
